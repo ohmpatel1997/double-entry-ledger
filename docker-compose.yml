@@ -1,8 +1,10 @@
 services:
   tigerbeetle:
     image: ghcr.io/tigerbeetledb/tigerbeetle
-    command: "start --addresses=0.0.0.0:3001 /data/0_0.tigerbeetle"
+    command: "start --addresses=0.0.0.0:3000 /data/0_0.tigerbeetle"
     network_mode: host
+    ports:
+      - "3000:3000"
     cap_add:
       - IPC_LOCK
     volumes:
