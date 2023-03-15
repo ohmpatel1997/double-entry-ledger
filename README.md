@@ -17,5 +17,5 @@
 
     
 
-You can now access the API at `http://localhost:9400/`. You can see all the API listed there. mainily we will be focusing on three apis.
+You can now access the API at `http://localhost:9400/`. You can see all the API listed there. 
 
