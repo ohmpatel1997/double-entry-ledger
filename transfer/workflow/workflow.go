@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
@@ -14,7 +15,8 @@ import (
 )
 
 type Service struct {
-	LedgerSvc *ledger.Service
+	LedgerSvc      *ledger.Service
+	temporalClient client.Client
 }
 
 type PaymentDetails struct {
@@ -24,8 +26,8 @@ type PaymentDetails struct {
 	Amount        uint64
 }
 
-func NewService(ledgerSvc *ledger.Service) *Service {
-	return &Service{LedgerSvc: ledgerSvc}
+func NewService(ledgerSvc *ledger.Service, temporalClient client.Client) *Service {
+	return &Service{LedgerSvc: ledgerSvc, temporalClient: temporalClient}
 }
 
 type PresentmentSignal struct {
@@ -72,12 +74,25 @@ func (s *Service) Authorization(ctx workflow.Context, paymentDetails *PaymentDet
 		var cancelID uuid.UUID
 		err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), uuid.NewV4).Get(ctx, &cancelID)
 		if err != nil {
+			tnsfer.Progress = db.TransferProgressFailedOnLedgerCancellation
+			// update the flag in external db
+			err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), db.InsertNewTransferWithProgress, tnsfer).Get(ctx, nil)
+			if err != nil {
+				return err
+			}
 			return err
 		}
 
 		err := workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), s.LedgerSvc.CancelTransaction, req.ID, cancelID).Get(ctx, nil)
 		if err != nil {
+			tnsfer.Progress = db.TransferProgressFailedOnLedgerCancellation
+			// update the flag in external db
+			err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), db.InsertNewTransferWithProgress, tnsfer).Get(ctx, nil)
+			if err != nil {
+				return err
+			}
 			return err
+
 		}
 		return err
 	}
@@ -90,7 +105,6 @@ func (s *Service) Authorization(ctx workflow.Context, paymentDetails *PaymentDet
 	futureCtx, futureCancel := workflow.WithCancel(ctx)
 	defer futureCancel()
 	timeoutFuture := workflow.NewTimer(futureCtx, 100*time.Second)
-
 	selector := workflow.NewSelector(ctx)
 	selector.AddReceive(presentmentChan, func(channel workflow.ReceiveChannel, more bool) {
 		channel.Receive(ctx, &signal)
@@ -110,17 +124,34 @@ func (s *Service) Authorization(ctx workflow.Context, paymentDetails *PaymentDet
 		var cancelID uuid.UUID
 		err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), uuid.NewV4).Get(ctx, &cancelID)
 		if err != nil {
+			// update the flag in external db
+			err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), db.UpdateTransferProgress, req.ID, db.TransferProgressFailedOnLedgerTimeout, nil).Get(ctx, nil)
+			if err != nil {
+				return err
+			}
 			return err
 		}
 
 		err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), s.LedgerSvc.CancelTransaction, req.ID, cancelID).Get(ctx, nil)
 		if err != nil {
+			// update the flag in external db
+			err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), db.UpdateTransferProgress, req.ID, db.TransferProgressFailedOnLedgerTimeout, nil).Get(ctx, nil)
+			if err != nil {
+				return err
+			}
+
 			return err
 		}
 
 		// update the flag in external db
-		err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), db.UpdateTransferAsTimeout, req.ID).Get(ctx, nil)
+		err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), db.UpdateTransferProgress, req.ID, db.TransferProgressSettled).Get(ctx, nil)
 		if err != nil {
+			// update the flag in external db
+			err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), db.UpdateTransferProgress, req.ID, db.TransferProgressFailedOnExternalDB, nil).Get(ctx, nil)
+			if err != nil {
+				return err
+			}
+
 			return err
 		}
 
@@ -129,17 +160,33 @@ func (s *Service) Authorization(ctx workflow.Context, paymentDetails *PaymentDet
 		var settlementID uuid.UUID
 		err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), uuid.NewV4).Get(ctx, &settlementID)
 		if err != nil {
+			// update the flag in external db
+			err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), db.UpdateTransferProgress, req.ID, db.TransferProgressFailedOnLedgerSettlement, nil).Get(ctx, nil)
+			if err != nil {
+				return err
+			}
+
 			return err
 		}
 
 		err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), s.LedgerSvc.SettleTransaction, req.ID, settlementID).Get(ctx, nil)
 		if err != nil {
+			// update the flag in external db
+			err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), db.UpdateTransferProgress, req.ID, db.TransferProgressFailedOnLedgerSettlement, nil).Get(ctx, nil)
+			if err != nil {
+				return err
+			}
 			return err
 		}
 
 		// update the flag in external db
-		err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), db.UpdateTransferProgress, req.ID, db.TransferProgressComplete).Get(ctx, nil)
+		err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), db.UpdateTransferProgress, req.ID, db.TransferProgressSettled).Get(ctx, nil)
 		if err != nil {
+			// update the flag in external db
+			err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), db.UpdateTransferProgress, req.ID, db.TransferProgressFailedOnExternalDB, nil).Get(ctx, nil)
+			if err != nil {
+				return err
+			}
 			return err
 		}
 	}
@@ -161,16 +208,40 @@ func (s *Service) Presentment(ctx workflow.Context, req *PaymentDetails) error {
 		RetryPolicy:         retrypolicy,
 	}
 
-	var result error
+	//dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	//defer cancel()
+	//
+	//var tx *sqldb.Tx
+	//err := workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), db.TransferDB.Begin, dbCtx).Get(ctx, tx)
+	//if err != nil {
+	//	return err
+	//}
+	//
+	//var transfer db.TransferResponse
+	//err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), db.GetTransaction, dbCtx, req.SourceAccount, req.Amount, db.TransferProgressInitiated, true, tx).Get(ctx, &transfer)
+	//if err != nil {
+	//	_ = tx.Rollback()
+	//	return err
+	//}
+	//
+	//req.WorkflowID = transfer.ID
 	// update the flag in external db
-	err := workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), signalActivity, req).Get(ctx, &result)
+	err := workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), s.SignalActivity, req).Get(ctx, nil)
 	if err != nil {
 		return err
 	}
 
-	if result != nil {
-		return result
-	}
+	//err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), db.UpdateTransferProgress, transfer.ID, db.TransferProgressInProcess, tx).Get(ctx, nil)
+	//if err != nil {
+	//	err = tx.Rollback()
+	//	return err
+	//}
+	//
+	//err = tx.Commit()
+	//if err != nil {
+	//	_ = tx.Rollback()
+	//	return err
+	//}
 
 	return nil
 }

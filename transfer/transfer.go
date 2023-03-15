@@ -38,7 +38,7 @@ func initService() (*Service, error) {
 	}
 	ledgerSvc := ledger.NewLedgerService(tbClient)
 
-	workflowSvc := workflow.NewService(ledgerSvc)
+	workflowSvc := workflow.NewService(ledgerSvc, c)
 
 	w := worker.New(c, encore.Meta().Environment.Name+"-credit-card-transfer", worker.Options{})
 
@@ -50,8 +50,10 @@ func initService() (*Service, error) {
 	w.RegisterActivity(ledgerSvc.SettleTransaction)
 	w.RegisterActivity(ledgerSvc.CancelTransaction)
 	w.RegisterActivity(db.InsertNewTransfer)
-	w.RegisterActivity(db.UpdateTransferAsTimeout)
 	w.RegisterActivity(db.UpdateTransferProgress)
+	w.RegisterActivity(workflowSvc.SignalActivity)
+	w.RegisterActivity(db.TransferDB.Begin)
+	w.RegisterActivity(db.GetTransaction)
 
 	err = w.Start()
 	if err != nil {
@@ -113,7 +115,7 @@ func (s *Service) Transfer(ctx context.Context, req *Request) error {
 			},
 		}
 
-		_, err = s.client.ExecuteWorkflow(ctx, options, s.workflowSvc.Presentment, ctx, &workflow.PaymentDetails{
+		_, err = s.client.ExecuteWorkflow(ctx, options, s.workflowSvc.Presentment, &workflow.PaymentDetails{
 			SourceAccount: req.CustomerAccount,
 			TargetAccount: 2, // bank's account, hardcoded for now
 			Amount:        req.Amount,
@@ -138,5 +140,5 @@ type PresentmentRequest struct {
 //
 //encore:api private method=GET
 func (s *Service) GetAuthTransferForPresentment(ctx context.Context, req *PresentmentRequest) (*db.TransferResponse, error) {
-	return db.GetTransaction(ctx, req.Account, req.Amount, db.TransferProgressInitiated, false)
+	return db.GetTransaction(ctx, req.Account, req.Amount, db.TransferProgressInitiated, false, nil)
 }

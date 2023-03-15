@@ -1,7 +1,6 @@
-CREATE  extension IF   NOT   EXISTS  "uuid-ossp";
 
 CREATE TABLE transfers (
-                            id uuid DEFAULT uuid_generate_v4 (),
+                            id uuid NOT NULL,
                             debit_account_id integer NOT NULL,
                             credit_account_id integer NOT NULL,
                             amount bigint NOT NULL,

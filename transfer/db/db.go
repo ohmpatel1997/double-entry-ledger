@@ -19,11 +19,13 @@ var (
 type TransferProgress string
 
 const (
-	TransferProgressInitiated   TransferProgress = "initiated"
-	TransferProgressInProcess   TransferProgress = "in_process"
-	TransferProgressComplete    TransferProgress = "completed"
-	TransferredProgressTimedOut TransferProgress = "timed_out"
-	TransferProgressFailed      TransferProgress = "failed"
+	TransferProgressInitiated                  TransferProgress = "initiated"
+	TransferProgressInProcess                  TransferProgress = "in_process"
+	TransferProgressSettled                    TransferProgress = "settled"
+	TransferProgressFailedOnLedgerSettlement   TransferProgress = "failed_ledger_settlement"
+	TransferProgressFailedOnLedgerTimeout      TransferProgress = "failed_ledger_timeout"
+	TransferProgressFailedOnExternalDB         TransferProgress = "failed_external_db"
+	TransferProgressFailedOnLedgerCancellation TransferProgress = "failed_ledger_cancellation"
 )
 
 type TransferResponse struct {
@@ -35,7 +37,7 @@ type TransferResponse struct {
 	TransferProgress string    `sql:"transfer_progress"`
 }
 
-func GetTransaction(ctx context.Context, customerAccount uint64, amount uint64, progress TransferProgress, forUpdate bool, tx ...*sqldb.Tx) (*TransferResponse, error) {
+func GetTransaction(ctx context.Context, customerAccount uint64, amount uint64, progress TransferProgress, forUpdate bool, tx *sqldb.Tx) (*TransferResponse, error) {
 	var transfer TransferResponse
 	query := `
 		SELECT id, debit_account_id, credit_account_id, amount, created_at, transfer_progress FROM transfers
@@ -48,12 +50,12 @@ func GetTransaction(ctx context.Context, customerAccount uint64, amount uint64, 
 	}
 
 	var err error
-	if len(tx) > 0 {
-		err = tx[0].QueryRow(ctx, query, customerAccount, amount, progress).
-			Scan(transfer.ID, transfer.DebitAccountID, transfer.CreditAccountID, transfer.Amount, transfer.CreatedAt, transfer.TransferProgress)
+	if tx != nil {
+		err = tx.QueryRow(ctx, query, customerAccount, amount, progress).
+			Scan(&transfer.ID, &transfer.DebitAccountID, &transfer.CreditAccountID, &transfer.Amount, &transfer.CreatedAt, &transfer.TransferProgress)
 	} else {
-		err = sqldb.QueryRow(ctx, query, customerAccount, amount, progress).
-			Scan(transfer.ID, transfer.DebitAccountID, transfer.CreditAccountID, transfer.Amount, transfer.CreatedAt, transfer.TransferProgress)
+		err = TransferDB.QueryRow(ctx, query, customerAccount, amount, progress).
+			Scan(&transfer.ID, &transfer.DebitAccountID, &transfer.CreditAccountID, &transfer.Amount, &transfer.CreatedAt, &transfer.TransferProgress)
 	}
 
 	switch {
@@ -74,43 +76,41 @@ type TransferReq struct {
 	DebitAccountID  uint64
 	CreditAccountID uint64
 	Amount          uint64
+	Progress        TransferProgress
 }
 
 // InsertNewTransfer inserts a transfer into the database idempotently on id
 func InsertNewTransfer(req *TransferReq) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, err := sqldb.Exec(ctx, `
+	_, err := TransferDB.Exec(ctx, `
 		INSERT INTO transfers (id, debit_account_id, credit_account_id, amount)
-		    VALUES ($1, $2, $3, $4, $5)
+		    VALUES ($1, $2, $3, $4)
 		    ON CONFLICT (id) DO NOTHING`, req.ID, req.DebitAccountID, req.CreditAccountID, req.Amount)
 	return err
 }
 
-// UpdateTransferAsTimeout inserts a transfer which ref to another transfer into the database idempotently on id
-func UpdateTransferAsTimeout(id uuid.UUID, tx ...*sqldb.Tx) error {
+// InsertNewTransferWithProgress inserts a transfer into the database idempotently on id withj given progress
+func InsertNewTransferWithProgress(req *TransferReq) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if len(tx) > 0 {
-		_, err := tx[0].Exec(ctx, `
-			update transfers set transfer_progress = $1 WHERE id = $2`,
-			TransferredProgressTimedOut, id)
-		return err
-	}
-	_, err := sqldb.Exec(ctx, `
-		update transfers set transfer_progress = $1 WHERE id = $2`,
-		TransferredProgressTimedOut, id)
-
+	_, err := TransferDB.Exec(ctx, `
+		INSERT INTO transfers (id, debit_account_id, credit_account_id, amount, transfer_progress)
+		    VALUES ($1, $2, $3, $4, $5)
+		    ON CONFLICT (id) DO NOTHING`, req.ID, req.DebitAccountID, req.CreditAccountID, req.Amount, req.Progress)
 	return err
 }
 
-func UpdateTransferProgress(ctx context.Context, id uuid.UUID, progress TransferProgress, tx ...*sqldb.Tx) error {
-	if len(tx) > 0 {
-		_, err := tx[0].Exec(ctx, `
+func UpdateTransferProgress(id uuid.UUID, progress TransferProgress, tx *sqldb.Tx) error {
+	dbCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	if tx != nil {
+		_, err := tx.Exec(dbCtx, `
 			update transfers set transfer_progress = $1 WHERE id = $2`, progress, id)
 		return err
 	}
-	_, err := sqldb.Exec(ctx, `
+	_, err := TransferDB.Exec(dbCtx, `
 		update transfers set transfer_progress = $1 WHERE id = $2`, progress, id)
 
 	return err

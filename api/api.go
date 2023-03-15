@@ -98,7 +98,7 @@ func (api *APIService) Balance(ctx context.Context, id uint64) (*BalanceResponse
 	}
 
 	return &BalanceResponse{
-		AvailableBalance: "$" + strconv.FormatFloat(float64(acc.CreditsPosted-acc.DebitsPosted)/100, 'f', 2, 64),
+		AvailableBalance: "$" + strconv.FormatFloat(float64(acc.CreditsPosted-acc.DebitsPosted-acc.DebitsPending)/100, 'f', 2, 64),
 		ReservedBalance:  "$" + strconv.FormatFloat(float64(acc.DebitsPending)/100, 'f', 2, 64),
 	}, nil
 }

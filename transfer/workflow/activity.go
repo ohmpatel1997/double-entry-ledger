@@ -4,19 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"encore.dev/beta/errs"
-	"go.temporal.io/sdk/workflow"
 
 	"github.com/ohmpatel1997/pave-coding-challenge-simon/transfer/db"
 )
 
-func signalActivity(ctx workflow.Context, req *PaymentDetails) error {
-	dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	tx, err := db.TransferDB.Begin(dbCtx)
+func (s *Service) SignalActivity(ctx context.Context, req *PaymentDetails) error {
+	tx, err := db.TransferDB.Begin(ctx)
 	if err != nil {
 		return &errs.Error{
 			Code:    errs.Internal,
@@ -25,7 +20,7 @@ func signalActivity(ctx workflow.Context, req *PaymentDetails) error {
 	}
 
 	// get a initiated transfer, get a lock, so not other workflow can pick it up
-	transfer, err := db.GetTransaction(dbCtx, req.SourceAccount, req.Amount, db.TransferProgressInitiated, true, tx)
+	transfer, err := db.GetTransaction(ctx, req.SourceAccount, req.Amount, db.TransferProgressInitiated, true, tx)
 	var encoreErr *errs.Error
 	switch {
 	// in case if there is another workflow that has already settled the transaction
@@ -37,15 +32,15 @@ func signalActivity(ctx workflow.Context, req *PaymentDetails) error {
 		return err
 	}
 
+	req.WorkflowID = transfer.ID
 	// signal the auth workflow to settle transaction
-	signal := workflow.SignalExternalWorkflow(ctx, transfer.ID.String(), "", fmt.Sprintf("presentment-%s", transfer.ID.String()), PresentmentSignal{ID: transfer.ID.String()})
-	if err = signal.Get(ctx, nil); err != nil {
-		tx.Rollback()
+	err = s.temporalClient.SignalWorkflow(ctx, req.WorkflowID.String(), "", fmt.Sprintf("presentment-%s", req.WorkflowID.String()), &PresentmentSignal{ID: req.WorkflowID.String()})
+	if err != nil {
 		return err
 	}
 
 	// update the transfer progress to in progress so that the another workflow doesn't pick it up
-	err = db.UpdateTransferProgress(dbCtx, transfer.ID, db.TransferProgressInProcess, tx)
+	err = db.UpdateTransferProgress(transfer.ID, db.TransferProgressInProcess, tx)
 	if err != nil {
 		tx.Rollback()
 		return err
