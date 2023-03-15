@@ -208,40 +208,10 @@ func (s *Service) Presentment(ctx workflow.Context, req *PaymentDetails) error {
 		RetryPolicy:         retrypolicy,
 	}
 
-	//dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	//defer cancel()
-	//
-	//var tx *sqldb.Tx
-	//err := workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), db.TransferDB.Begin, dbCtx).Get(ctx, tx)
-	//if err != nil {
-	//	return err
-	//}
-	//
-	//var transfer db.TransferResponse
-	//err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), db.GetTransaction, dbCtx, req.SourceAccount, req.Amount, db.TransferProgressInitiated, true, tx).Get(ctx, &transfer)
-	//if err != nil {
-	//	_ = tx.Rollback()
-	//	return err
-	//}
-	//
-	//req.WorkflowID = transfer.ID
-	// update the flag in external db
 	err := workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), s.SignalActivity, req).Get(ctx, nil)
 	if err != nil {
 		return err
 	}
-
-	//err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options), db.UpdateTransferProgress, transfer.ID, db.TransferProgressInProcess, tx).Get(ctx, nil)
-	//if err != nil {
-	//	err = tx.Rollback()
-	//	return err
-	//}
-	//
-	//err = tx.Commit()
-	//if err != nil {
-	//	_ = tx.Rollback()
-	//	return err
-	//}
 
 	return nil
 }
