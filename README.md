@@ -1,4 +1,4 @@
-# pave-coding-challenge-simon
+# double entry ledger
 
 
 
